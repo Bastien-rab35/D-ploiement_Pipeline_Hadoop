@@ -1,13 +1,13 @@
 services:
   # Zookeeper est nécessaire pour gérer le cluster Kafka
   zookeeper:
-    image: zookeeper:3.9.2
+    image: zookeeper:3.9.5
     ports:
       - "2181:2181"
 
   # Le broker Kafka pour l'ingestion temps réel
   kafka:
-    image: bitnamilegacy/kafka:3.7.0
+    image: bitnami/kafka:3.9.2
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
@@ -22,7 +22,7 @@ services:
 
   # La base de données relationnelle cible (utilisée dans ton DAG Airflow)
   postgres:
-    image: postgres:15
+    image: postgres:18
     environment:
       - POSTGRES_USER=airflow
       - POSTGRES_PASSWORD=airflow
@@ -43,9 +43,15 @@ services:
       - "9000:9000" # Port API (Spark lira ici)
       - "9001:9001" # Port Console (Interface Web)
 
+  # --- Modèle Machine Learning ---
+  fake-news-detector:
+    image: josumsc/flask-fake-news
+    ports:
+      - "5001:5000" # Port 5001 exposé pour le job Spark local
+
   # --- Apache Airflow (Orchestration) ---
   airflow-init:
-    image: apache/airflow:2.9.1
+    image: apache/airflow:3.2.2
     depends_on:
       - postgres
     environment:
@@ -56,7 +62,7 @@ services:
       bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
 
   airflow-webserver:
-    image: apache/airflow:2.9.1
+    image: apache/airflow:3.2.2
     depends_on:
       - airflow-init
     environment:
@@ -72,7 +78,7 @@ services:
     command: webserver
 
   airflow-scheduler:
-    image: apache/airflow:2.9.1
+    image: apache/airflow:3.2.2
     depends_on:
       - airflow-init
     environment:

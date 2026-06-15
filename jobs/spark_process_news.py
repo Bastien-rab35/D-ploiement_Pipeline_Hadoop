@@ -1,7 +1,35 @@
 import pyspark
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json
-from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql.functions import col, from_json, udf
+from pyspark.sql.types import StructType, StructField, StringType, BooleanType
+
+# --- Définition de l'UDF pour le Machine Learning ---
+@udf(returnType=BooleanType())
+def detect_fake_news_udf(title, summary, source):
+    """
+    Applique le modèle de Machine Learning pour déterminer si la news est fausse.
+    """
+    # Import local à l'UDF pour éviter les erreurs de sérialisation sur les workers Spark
+    import requests 
+    
+    text_to_analyze = f"{title}. {summary}"
+    
+    try:
+        # Appel à l'API REST locale fournie par le conteneur Docker
+        response = requests.post(
+            "http://localhost:5001/detect_json",
+            json={"text": text_to_analyze},
+            timeout=5 # Timeout pour ne pas bloquer Spark indéfiniment
+        )
+        if response.status_code == 200:
+            result = response.json()
+            # L'API renvoie un JSON. Si le mot "fake" s'y trouve, on le classe comme faux.
+            return "fake" in str(result).lower()
+    except Exception:
+        pass # Si l'API est inaccessible, on ignore l'erreur
+        
+    # En cas d'erreur ou si la news est vraie
+    return False
 
 def create_spark_session():
     # Récupération dynamique de la version de PySpark installée
@@ -82,8 +110,13 @@ def main():
         .select(from_json(col("json_string"), news_schema).alias("data")) \
         .select("data.*")
 
+    # 3.5. Application du modèle de Machine Learning (ajout de la colonne is_fake)
+    df_processed = df_parsed.withColumn(
+        "is_fake", detect_fake_news_udf(col("title"), col("summary"), col("source"))
+    )
+
     # 4. Écriture des données structurées dans PostgreSQL et S3
-    query = df_parsed.writeStream \
+    query = df_processed.writeStream \
         .foreachBatch(write_to_sinks) \
         .start()
 
