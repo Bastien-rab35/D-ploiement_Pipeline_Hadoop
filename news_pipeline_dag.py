@@ -14,7 +14,9 @@ with DAG(
     'news_scraping_pipeline',
     default_args=default_args,
     description='Scraping des news financières depuis différentes sources',
-    # "0 */6 * * *" = Minute 0 passée de toutes les 6 heures (00h, 06h, 12h, 18h)
+    # Programmation CRON : "0 */6 * * *"
+    # Exécute le job à la minute 0, toutes les 6 heures (00h00, 06h00, 12h00, 18h00)
+    # Cela répond à la contrainte de collecte du sujet.
     schedule_interval='0 */6 * * *',
     catchup=False,
     tags=['finance', 'scraping'],

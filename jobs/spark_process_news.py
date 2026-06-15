@@ -1,13 +1,25 @@
 import pyspark
+import os
+import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, udf
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType
+
+# --- Correction du conflit de version Python sur l'environnement local ---
+# Force PySpark à utiliser le même interpréteur Python pour le processus
+# principal (Driver) et les processus distribués (Workers).
+if 'pyspark' in sys.modules:
+    os.environ['PYSPARK_PYTHON'] = sys.executable
+    os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
+
 
 # --- Définition de l'UDF pour le Machine Learning ---
 @udf(returnType=BooleanType())
 def detect_fake_news_udf(title, summary, source):
     """
-    Applique le modèle de Machine Learning pour déterminer si la news est fausse.
+    User Defined Function (UDF) PySpark :
+    Permet d'appliquer une fonction Python classique (ici, l'appel à notre API de Machine Learning)
+    de manière distribuée sur tous les workers du cluster Spark.
     """
     # Import local à l'UDF pour éviter les erreurs de sérialisation sur les workers Spark
     import requests 
@@ -23,7 +35,12 @@ def detect_fake_news_udf(title, summary, source):
         )
         if response.status_code == 200:
             result = response.json()
-            # L'API renvoie un JSON. Si le mot "fake" s'y trouve, on le classe comme faux.
+            
+            # Amélioration : on cherche "fake" uniquement dans les prédictions
+            # pour éviter les faux positifs si l'API nous renvoie le texte d'origine.
+            if isinstance(result, dict):
+                prediction_values = [str(v).lower() for k, v in result.items() if k != "text"]
+                return any("fake" in v for v in prediction_values)
             return "fake" in str(result).lower()
     except Exception:
         pass # Si l'API est inaccessible, on ignore l'erreur
@@ -32,6 +49,10 @@ def detect_fake_news_udf(title, summary, source):
     return False
 
 def create_spark_session():
+    """
+    Initialise la session Spark avec les dépendances (packages) nécessaires
+    pour communiquer avec Kafka, PostgreSQL et AWS S3 (MinIO).
+    """
     # Récupération dynamique de la version de PySpark installée
     spark_version = pyspark.__version__
     
@@ -40,22 +61,35 @@ def create_spark_session():
     kafka_package = f"org.apache.spark:spark-sql-kafka-0-10_{scala_version}:{spark_version}"
     # Ajout du driver JDBC PostgreSQL
     postgres_package = "org.postgresql:postgresql:42.6.0"
+    
+    # Adaptation dynamique des librairies AWS/Hadoop selon la version de PySpark
+    if int(spark_version.split('.')[0]) >= 4:
+        hadoop_aws_version = "3.4.2"
+        aws_sdk_version = "1.12.767"
+    else:
+        hadoop_aws_version = "3.3.4"
+        aws_sdk_version = "1.12.262"
+
     # Ajout des librairies Hadoop-AWS pour communiquer avec MinIO (S3)
-    aws_packages = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
+    aws_packages = f"org.apache.hadoop:hadoop-aws:{hadoop_aws_version},com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}"
 
     return SparkSession.builder \
         .appName("NewsStreamingProcessor") \
         .config("spark.jars.packages", f"{kafka_package},{postgres_package},{aws_packages}") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "admin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "password") \
+        .config("spark.hadoop.fs.s3a.endpoint", os.getenv("MINIO_ENDPOINT", "http://localhost:9000")) \
+        .config("spark.hadoop.fs.s3a.access.key", os.getenv("MINIO_ROOT_USER", "admin")) \
+        .config("spark.hadoop.fs.s3a.secret.key", os.getenv("MINIO_ROOT_PASSWORD", "password")) \
         .config("spark.hadoop.fs.s3a.path.style.access", "true") \
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
         .master("local[*]") \
         .getOrCreate()
 
 def write_to_sinks(df, epoch_id):
-    """Fonction exécutée pour chaque micro-batch afin d'écrire dans PostgreSQL ET MinIO."""
+    """
+    Fonction utilisée par le 'foreachBatch' de Spark Streaming.
+    Elle permet d'écrire le même micro-batch de données vers plusieurs destinations (Sinks)
+    simultanément : PostgreSQL (pour la B.I.) et MinIO (pour le Data Lake).
+    """
     # On ignore le batch s'il est vide (pas de nouvelles données)
     if df.count() == 0:
         return
@@ -64,11 +98,11 @@ def write_to_sinks(df, epoch_id):
         # 1. Écriture dans la base de données relationnelle
         df.write \
             .format("jdbc") \
-            .option("url", "jdbc:postgresql://localhost:5432/finance_news") \
+            .option("url", "jdbc:postgresql://localhost:5433/finance_news") \
             .option("driver", "org.postgresql.Driver") \
             .option("dbtable", "news_articles") \
-            .option("user", "airflow") \
-            .option("password", "airflow") \
+            .option("user", os.getenv("POSTGRES_USER", "airflow")) \
+            .option("password", os.getenv("POSTGRES_PASSWORD", "airflow")) \
             .mode("append") \
             .save()
 
@@ -97,7 +131,9 @@ def main():
     ])
 
     # 2. Lecture du flux Kafka
-    # "startingOffsets" = "earliest" permet de relire tous les messages déjà présents dans Kafka
+    # L'option "startingOffsets": "earliest" est cruciale ici.
+    # Elle répond à la contrainte du sujet : "Permettre de retraiter très rapidement 
+    # toutes les informations collectées depuis le début".
     df_kafka = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9093") \
