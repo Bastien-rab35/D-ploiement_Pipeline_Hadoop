@@ -1,22 +1,47 @@
 import unittest
 import sys
 import os
+from unittest.mock import patch, MagicMock
 
-# Ajout du répertoire parent au path pour pouvoir importer le scraper
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scrapers.news_scraper import scrape_rss_feed
 
 class TestNewsScraper(unittest.TestCase):
 
-    def test_scrape_gorafi_structure(self):
-        """Test que la fonction générique RSS fonctionne et ramène les bons champs."""
-        articles = scrape_rss_feed("https://www.legorafi.fr/feed/", "Gorafi", limit=5)
+    # On "mock" (intercepte) la fonction requests.get utilisée dans news_scraper
+    @patch('scrapers.news_scraper.requests.get')
+    def test_scrape_rss_feed_structure(self, mock_get):
+        """Vérifie que la fonction RSS renvoie bien la bonne structure de données à l'aide d'un Mock (sans requête internet)."""
+        
+        # Création d'une fausse réponse XML imitant un flux RSS
+        fausse_reponse_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+            <channel>
+                <item>
+                    <title>Titre de test unitaire</title>
+                    <description>Ceci est un résumé de test unitaire</description>
+                    <pubDate>Mon, 01 Jan 2024 12:00:00 +0000</pubDate>
+                </item>
+            </channel>
+        </rss>
+        """
+        
+        # Configuration du mock pour qu'il renvoie notre faux XML
+        mock_response = MagicMock()
+        mock_response.content = fausse_reponse_xml.encode('utf-8')
+        mock_get.return_value = mock_response
+
+        # Exécution de la fonction avec une fausse URL (qui ne sera jamais appelée)
+        articles = scrape_rss_feed("http://url-fictive.com", "MockSource", limit=5)
+        
         self.assertIsInstance(articles, list)
-        if len(articles) > 0:
-            article = articles[0]
-            self.assertIn("title", article)
-            self.assertIn("summary", article)
-            self.assertEqual(article.get("source"), "Gorafi")
+        self.assertEqual(len(articles), 1)
+        
+        article = articles[0]
+        self.assertEqual(article.get("title"), "Titre de test unitaire")
+        # Le scraper ajoute "..." à la fin du résumé
+        self.assertEqual(article.get("summary"), "Ceci est un résumé de test unitaire...")
+        self.assertEqual(article.get("source"), "MockSource")
 
 if __name__ == '__main__':
     unittest.main()
