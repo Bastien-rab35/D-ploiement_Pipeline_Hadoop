@@ -43,5 +43,15 @@ class TestNewsScraper(unittest.TestCase):
         self.assertEqual(article.get("summary"), "Ceci est un résumé de test unitaire...")
         self.assertEqual(article.get("source"), "MockSource")
 
+    def test_is_valid_iso_date(self):
+        """Vérifie que la fonction de validation de date distingue correctement les formats ISO valides et invalides (EID4.4)."""
+        from jobs.pipeline_monitor import is_valid_iso_date
+        self.assertTrue(is_valid_iso_date("2026-06-18T08:54:53"))
+        self.assertTrue(is_valid_iso_date("2026-06-18T08:54:53Z"))
+        self.assertFalse(is_valid_iso_date("2026-18-06")) # Inversion mois/jour
+        self.assertFalse(is_valid_iso_date("18 juin 2026")) # Format textuel
+        self.assertFalse(is_valid_iso_date(None))
+        self.assertFalse(is_valid_iso_date(""))
+
 if __name__ == '__main__':
     unittest.main()

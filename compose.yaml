@@ -4,10 +4,15 @@ services:
     image: zookeeper:3.9.5
     ports:
       - "2181:2181"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
 
   # Le broker Kafka pour l'ingestion temps réel
   kafka:
-    image: bitnami/kafka:3.9.2
+    image: bitnamilegacy/kafka:3.9.0
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
@@ -15,12 +20,21 @@ services:
       - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,EXTERNAL://:9093
       - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
       - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      # --- Optimisations EID4.5 ---
+      - KAFKA_CFG_COMPRESSION_TYPE=snappy # Optimisation de la bande passante
+      - KAFKA_CFG_LOG_RETENTION_HOURS=24  # Gestion de la capacité (conservation 24h)
+      - KAFKA_CFG_LOG_RETENTION_BYTES=1073741824 # Limite à 1 Go par partition
     ports:
       - "9093:9093"
     depends_on:
       - zookeeper
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
 
-  # La base de données relationnelle cible (utilisée dans ton DAG Airflow)
+  # La base de données relationnelle cible (utilisée dans le DAG Airflow)
   postgres:
     image: postgres:18
     environment:
@@ -28,9 +42,15 @@ services:
       - POSTGRES_PASSWORD=airflow
       - POSTGRES_DB=finance_news
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
 
   # Le Data Lake pour stocker l'historique des news (S3 local)
   minio:
@@ -42,12 +62,40 @@ services:
     ports:
       - "9000:9000" # Port API (Spark lira ici)
       - "9001:9001" # Port Console (Interface Web)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
 
   # --- Modèle Machine Learning ---
   fake-news-detector:
     image: josumsc/flask-fake-news
+    platform: linux/amd64
     ports:
-      - "5001:5000" # Port 5001 exposé pour le job Spark local
+      - "5001:5000"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4096M
+
+  # --- Apache Spark Connect Server ---
+  spark-connect:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    command: >
+      bash -c "/opt/spark/sbin/start-connect-server.sh --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.postgresql:postgresql:42.6.0,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
+    ports:
+      - "15002:15002"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1536M
 
   # --- Apache Airflow (Orchestration) ---
   airflow-init:
@@ -75,7 +123,13 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./scrapers:/opt/airflow/scrapers
-    command: webserver
+      - ./jobs:/opt/airflow/jobs
+    command: api-server
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 768M
 
   airflow-scheduler:
     image: apache/airflow:3.2.2
@@ -84,13 +138,42 @@ services:
     environment:
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/finance_news
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      # Installation des librairies pour faire fonctionner ton scraper dans le conteneur
+      # Installation des librairies pour faire fonctionner le scraper dans le conteneur
       - _PIP_ADDITIONAL_REQUIREMENTS=kafka-python requests beautifulsoup4 lxml
       - KAFKA_BROKER=kafka:9092
     volumes:
       - ./dags:/opt/airflow/dags
       - ./scrapers:/opt/airflow/scrapers
+      - ./jobs:/opt/airflow/jobs
     command: scheduler
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 768M
+
+  # --- Outil de Business Intelligence ---
+  metabase:
+    image: metabase/metabase:latest
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 1536M
+
+  # Création automatique du bucket S3/MinIO (EID4.5)
+  create-buckets:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set local http://minio:9000 admin password) do echo 'Waiting for Minio...' && sleep 1; done;
+      /usr/bin/mc mb --ignore-existing local/data-lake;
+      exit 0;
+      "
 
 volumes:
   pgdata:

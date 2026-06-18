@@ -2,67 +2,70 @@ import pyspark
 import os
 import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, udf
+from pyspark.sql.functions import col, from_json, udf, year, month, dayofmonth, to_timestamp
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType
 
-# --- Correction du conflit de version Python sur l'environnement local ---
-# Force PySpark à utiliser le même interpréteur Python pour le processus
-# principal (Driver) et les processus distribués (Workers).
+# Force PySpark à utiliser le même interpréteur Python pour le Driver et les Workers
 if 'pyspark' in sys.modules:
     os.environ['PYSPARK_PYTHON'] = sys.executable
     os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
-
-# --- Définition de l'UDF pour le Machine Learning ---
 @udf(returnType=BooleanType())
 def detect_fake_news_udf(title, summary, source):
     """
-    User Defined Function (UDF) PySpark :
-    Permet d'appliquer une fonction Python classique (ici, l'appel à notre API de Machine Learning)
-    de manière distribuée sur tous les workers du cluster Spark.
+    UDF PySpark : Application de l'API de Machine Learning de manière distribuée sur le cluster.
     """
-    # Import local à l'UDF pour éviter les erreurs de sérialisation sur les workers Spark
+    # Import de requests localement pour éviter les erreurs de sérialisation
     import requests 
+    import time
     
     text_to_analyze = f"{title}. {summary}"
     
     try:
-        # Appel à l'API REST locale fournie par le conteneur Docker
-        response = requests.post(
-            "http://localhost:5001/detect_json",
-            json={"text": text_to_analyze},
-            timeout=5 # Timeout pour ne pas bloquer Spark indéfiniment
-        )
-        if response.status_code == 200:
-            result = response.json()
+        from deep_translator import GoogleTranslator
+        text_to_analyze = GoogleTranslator(source='auto', target='en').translate(text_to_analyze)
+    except Exception as e:
+        print(f"Translation error: {str(e)}")
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            # Interrogation du modèle ML via son API (Nom DNS Docker)
+            response = requests.post(
+                "http://fake-news-detector:5000/detect_json",
+                json={"text": text_to_analyze},
+                timeout=15
+            )
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Recherche de "fake" uniquement dans les prédictions pour éviter les faux positifs
+                if isinstance(result, dict):
+                    prediction_values = [str(v).lower() for k, v in result.items() if k != "text"]
+                    return any("fake" in v for v in prediction_values)
+                return "fake" in str(result).lower()
+            else:
+                print(f"ML API Erreur HTTP {response.status_code} (Tentative {attempt+1}/{max_retries})")
+                time.sleep(2)
+        except Exception as e:
+            print(f"ML API Exception: {str(e)} (Tentative {attempt+1}/{max_retries})")
+            time.sleep(2)
             
-            # Amélioration : on cherche "fake" uniquement dans les prédictions
-            # pour éviter les faux positifs si l'API nous renvoie le texte d'origine.
-            if isinstance(result, dict):
-                prediction_values = [str(v).lower() for k, v in result.items() if k != "text"]
-                return any("fake" in v for v in prediction_values)
-            return "fake" in str(result).lower()
-    except Exception:
-        pass # Si l'API est inaccessible, on ignore l'erreur
-        
-    # En cas d'erreur ou si la news est vraie
+    # Par défaut, la news est considérée comme vraie si toutes les tentatives échouent
     return False
 
 def create_spark_session():
     """
-    Initialise la session Spark avec les dépendances (packages) nécessaires
-    pour communiquer avec Kafka, PostgreSQL et AWS S3 (MinIO).
+    Initialise la session Spark avec les packages pour Kafka, Postgres et MinIO.
     """
-    # Récupération dynamique de la version de PySpark installée
     spark_version = pyspark.__version__
     
-    # Spark 4+ utilise Scala 2.13 par défaut, Spark 3 utilise Scala 2.12
     scala_version = "2.13" if int(spark_version.split('.')[0]) >= 4 else "2.12"
     kafka_package = f"org.apache.spark:spark-sql-kafka-0-10_{scala_version}:{spark_version}"
-    # Ajout du driver JDBC PostgreSQL
+    
     postgres_package = "org.postgresql:postgresql:42.6.0"
     
-    # Adaptation dynamique des librairies AWS/Hadoop selon la version de PySpark
+    # Adaptation des librairies AWS selon la version de PySpark installée
     if int(spark_version.split('.')[0]) >= 4:
         hadoop_aws_version = "3.4.2"
         aws_sdk_version = "1.12.767"
@@ -70,7 +73,6 @@ def create_spark_session():
         hadoop_aws_version = "3.3.4"
         aws_sdk_version = "1.12.262"
 
-    # Ajout des librairies Hadoop-AWS pour communiquer avec MinIO (S3)
     aws_packages = f"org.apache.hadoop:hadoop-aws:{hadoop_aws_version},com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}"
 
     return SparkSession.builder \
@@ -81,22 +83,26 @@ def create_spark_session():
         .config("spark.hadoop.fs.s3a.secret.key", os.getenv("MINIO_ROOT_PASSWORD", "password")) \
         .config("spark.hadoop.fs.s3a.path.style.access", "true") \
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .master("local[*]") \
+        .config("spark.sql.shuffle.partitions", "4") \
+        .config("spark.streaming.stopGracefullyOnShutdown", "true") \
+        .remote("sc://localhost:15002") \
         .getOrCreate()
 
 def write_to_sinks(df, epoch_id):
     """
-    Fonction utilisée par le 'foreachBatch' de Spark Streaming.
-    Elle permet d'écrire le même micro-batch de données vers plusieurs destinations (Sinks)
-    simultanément : PostgreSQL (pour la B.I.) et MinIO (pour le Data Lake).
+    Fonction utilisée dans le foreachBatch pour écrire simultanément dans PostgreSQL et MinIO.
     """
-    # On ignore le batch s'il est vide (pas de nouvelles données)
     if df.count() == 0:
         return
 
     try:
-        # 1. Écriture dans la base de données relationnelle
-        df.write \
+        # Note d'architecture : Spark tournant en local sur l'hôte (master="local[*]"),
+        # on utilise 'localhost' pour atteindre le port exposé par le conteneur Docker.
+        # (Si Spark était "dockerizé", on utiliserait le nom de service 'postgres')
+        # Écriture dans la base de données relationnelle
+        # 1. Écriture dans la base de données relationnelle (sans les colonnes de partition)
+        df_postgres = df.select("source", "title", "summary", "event_date", "publish_date", "is_fake")
+        df_postgres.write \
             .format("jdbc") \
             .option("url", "jdbc:postgresql://localhost:5433/finance_news") \
             .option("driver", "org.postgresql.Driver") \
@@ -106,22 +112,23 @@ def write_to_sinks(df, epoch_id):
             .mode("append") \
             .save()
 
-        # 2. Écriture de l'historique brut dans le Data Lake (MinIO) au format JSON
+        # 2. Écriture de l'historique brut dans le Data Lake (S3/MinIO) partitionné par date (EID4.5)
         df.write \
             .format("json") \
+            .partitionBy("year", "month", "day") \
             .mode("append") \
             .save("s3a://data-lake/raw-news/")
-        print(f"INFO: Batch {epoch_id} écrit avec succès dans Postgres et MinIO.")
+        print(f"INFO: Batch {epoch_id} écrit avec succès dans Postgres et MinIO (partitionné).")
     except Exception as e:
         print(f"ERREUR CRITIQUE sur le batch {epoch_id} : Impossible d'écrire les données. Raison : {str(e)}")
 
 def main():
     spark = create_spark_session()
-    spark.sparkContext.setLogLevel("WARN") # Pour cacher les dizaines de logs d'information de Spark
+    spark.sparkContext.setLogLevel("WARN")
 
     print("Démarrage du job Spark... En attente de messages depuis Kafka...")
 
-    # 1. Définition du schéma correspondant à l'objet JSON envoyé par notre scraper
+    # Définition du schéma du JSON reçu
     news_schema = StructType([
         StructField("source", StringType(), True),
         StructField("title", StringType(), True),
@@ -130,33 +137,37 @@ def main():
         StructField("publish_date", StringType(), True)
     ])
 
-    # 2. Lecture du flux Kafka
-    # L'option "startingOffsets": "earliest" est cruciale ici.
-    # Elle répond à la contrainte du sujet : "Permettre de retraiter très rapidement 
-    # toutes les informations collectées depuis le début".
+    # Lecture du flux Kafka depuis le début (earliest) pour respecter la contrainte du sujet
     df_kafka = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9093") \
         .option("subscribe", "raw_news") \
-        .option("startingOffsets", "earliest") \
+        .option("startingOffsets", "latest") \
         .load()
 
-    # 3. Transformation des données brutes en colonnes structurées
+    # Transformation des données brutes en colonnes
     df_parsed = df_kafka.selectExpr("CAST(value AS STRING) as json_string") \
         .select(from_json(col("json_string"), news_schema).alias("data")) \
         .select("data.*")
 
-    # 3.5. Application du modèle de Machine Learning (ajout de la colonne is_fake)
+    # Application du modèle de ML via l'UDF
     df_processed = df_parsed.withColumn(
         "is_fake", detect_fake_news_udf(col("title"), col("summary"), col("source"))
     )
 
-    # 4. Écriture des données structurées dans PostgreSQL et S3
-    query = df_processed.writeStream \
+    # Ajout des colonnes de partitionnement pour le Data Lake MinIO (EID4.5)
+    df_partitioned = df_processed \
+        .withColumn("timestamp", to_timestamp(col("event_date"))) \
+        .withColumn("year", year(col("timestamp"))) \
+        .withColumn("month", month(col("timestamp"))) \
+        .withColumn("day", dayofmonth(col("timestamp"))) \
+        .drop("timestamp")
+
+    query = df_partitioned.writeStream \
         .foreachBatch(write_to_sinks) \
         .start()
 
-    query.awaitTermination() # Maintient l'application ouverte en continu
+    query.awaitTermination()
 
 if __name__ == "__main__":
     main()
