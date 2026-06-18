@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from kafka import KafkaProducer
 from datetime import datetime
 import os
+from email.utils import parsedate_to_datetime
 
 # Configuration de Kafka
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9093')
@@ -31,14 +32,20 @@ def scrape_rss_feed(url, source_name, limit=30):
     for item in items[:limit]:
         title = item.find('title').text if item.find('title') else ""
         summary = item.find('description').text[:200] + "..." if item.find('description') else ""
-        pub_date = item.find('pubDate').text if item.find('pubDate') else ""
+        pub_date_str = item.find('pubDate').text if item.find('pubDate') else ""
+        
+        # Tente de convertir la date RFC du flux RSS en format ISO (EID4.4)
+        try:
+            parsed_date = parsedate_to_datetime(pub_date_str).isoformat()
+        except Exception:
+            parsed_date = datetime.now().isoformat()
         
         article_data = {
             "source": source_name,
             "title": title,
             "summary": summary,
-            "event_date": datetime.now().isoformat(), 
-            "publish_date": pub_date
+            "event_date": parsed_date, 
+            "publish_date": parsed_date
         }
         articles.append(article_data)
         
@@ -66,6 +73,32 @@ def scrape_afp_factcheck():
         articles.append(article_data)
     return articles
 
+def scrape_wp_json_api(url, source_name, limit=10):
+    """Scrape une API REST native WordPress (JSON) EID4.4"""
+    print(f"Scraping API JSON {source_name}...")
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        articles = []
+        for item in data[:limit]:
+            # Nettoyage des balises HTML du titre et résumé renvoyés par WordPress
+            title = BeautifulSoup(item.get('title', {}).get('rendered', ''), "html.parser").text
+            summary = BeautifulSoup(item.get('excerpt', {}).get('rendered', ''), "html.parser").text[:200] + "..."
+            
+            article_data = {
+                "source": source_name,
+                "title": title,
+                "summary": summary,
+                "event_date": item.get('date', datetime.now().isoformat()),
+                "publish_date": item.get('date', datetime.now().isoformat())
+            }
+            articles.append(article_data)
+        return articles
+    except Exception as e:
+        print(f"Erreur API JSON {source_name}: {e}")
+        return []
+
 def run_all_scrapers():
     """Exécute tous les scrapers et envoie les données à Kafka."""
     producer = create_producer()
@@ -75,6 +108,10 @@ def run_all_scrapers():
     news_data.extend(scrape_rss_feed("https://www.legorafi.fr/feed/", "Gorafi"))
     news_data.extend(scrape_rss_feed("https://www.lemonde.fr/rss/une.xml", "Le Monde"))
     news_data.extend(scrape_rss_feed("https://www.francetvinfo.fr/titres.rss", "France Info"))
+    
+    # Nouvelles sources via API (JSON) plutôt que RSS
+    news_data.extend(scrape_wp_json_api("https://www.factcheck.org/wp-json/wp/v2/posts", "FactCheck.org (API)"))
+    
     news_data.extend(scrape_afp_factcheck())
     
     for article in news_data:

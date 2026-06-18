@@ -1,26 +1,26 @@
 {
-    "timestamp": "2026-06-18T09:20:48.962867",
+    "timestamp": "2026-06-18T10:22:24.484162",
     "services": {
         "Zookeeper": "UP",
         "Kafka Broker": "UP",
         "PostgreSQL": "UP",
         "MinIO Data Lake": "UP",
-        "Fake News ML API": "UP"
+        "Fake News ML API": "UP",
+        "Spark Connect": "UP"
     },
     "data_quality": {
-        "status": "WARNING",
+        "status": "SUCCESS",
         "metrics": {
-            "total_records": 199,
-            "records_last_24h": 199,
+            "total_records": 349,
+            "records_last_24h": 349,
             "missing_fields_records": 0,
             "short_titles_records": 0,
             "invalid_dates_records": 0,
             "is_fake_distribution": {
-                "False": 199
+                "False": 290,
+                "True": 59
             }
         },
-        "anomalies_detected": [
-            "Alerte ML : 0 Fake News détectée sur l'ensemble de la base. Risque de faux négatifs du modèle."
-        ]
+        "anomalies_detected": []
     }
 }

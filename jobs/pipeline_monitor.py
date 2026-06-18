@@ -23,6 +23,7 @@ SERVICES = {
     "PostgreSQL": {"host": "postgres" if RUNNING_IN_DOCKER else "localhost", "port": 5432 if RUNNING_IN_DOCKER else 5433},
     "MinIO Data Lake": {"host": "minio" if RUNNING_IN_DOCKER else "localhost", "port": 9000},
     "Fake News ML API": {"host": "fake-news-detector" if RUNNING_IN_DOCKER else "localhost", "port": 5000 if RUNNING_IN_DOCKER else 5001},
+    "Spark Connect": {"host": "spark-connect" if RUNNING_IN_DOCKER else "localhost", "port": 15002},
 }
 
 DB_CONFIG = {

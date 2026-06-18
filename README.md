@@ -29,17 +29,27 @@ La vérification de l'information doit être au maximum automatisée.
 Ce projet implémente une architecture Big Data répondant aux besoins des équipes Data Science et Business Intelligence (B.I.) :
 
 1. **Ingestion (Temps réel)** : Des scrapers Python récupèrent les articles et les publient dans **Apache Kafka**.
-2. **Traitement (Apache Spark)** : Un job Spark Streaming consomme les messages Kafka, structure les données et les distribue.
-3. **Stockage B.I. (PostgreSQL)** : Les données structurées sont insérées dans une base de données relationnelle pour l'équipe B.I. (accès `jdbc:postgresql://localhost:5432/finance_news`).
-4. **Data Lake (MinIO / S3)** : L'historique brut est stocké sous forme de fichiers JSON dans MinIO, idéal pour l'exploration et l'entraînement de modèles par les Data Scientists (bucket `s3a://data-lake/raw-news/`).
+2. **Traitement Découplé (Spark Connect)** : Un serveur **Apache Spark** s'exécute dans un conteneur Docker. Le script client PySpark s'y connecte via gRPC (port 15002) pour consommer Kafka et orchestrer le pipeline.
+3. **Machine Learning** : À la volée, les articles en français sont traduits en anglais via `deep-translator` puis envoyés à une API de classification ML conteneurisée pour détecter les Fake News.
+4. **Stockage B.I. (PostgreSQL)** : Les données structurées sont insérées dans une base de données relationnelle pour l'équipe B.I. (accès `jdbc:postgresql://localhost:5433/finance_news`).
+5. **Data Lake (MinIO / S3)** : L'historique brut est stocké sous forme de fichiers JSON dans MinIO, idéal pour l'exploration et l'entraînement de modèles par les Data Scientists (bucket `s3a://data-lake/raw-news/`).
 
-## Exécution en local
+## Déploiement et Exécution
 
-Pour lancer le job de traitement Spark en local sur votre machine, exécutez la commande suivante à la racine du projet :
+Pour déployer l'architecture et lancer le pipeline, suivez ces étapes :
 
-```bash
-python jobs/spark_process_news.py
-```
+1. Démarrez l'infrastructure (Postgres, Kafka, MinIO, Airflow, Spark Connect, et le Modèle ML) :
+   ```bash
+   docker compose up -d --build
+   ```
+2. Installez les dépendances PySpark sur la machine cliente locale :
+   ```bash
+   pip install pyspark==3.5.3
+   ```
+3. Exécutez le script client Spark (qui se connectera au cluster Spark Connect) :
+   ```bash
+   python jobs/spark_process_news.py
+   ```
 
 ## Tests et Surveillance
 
