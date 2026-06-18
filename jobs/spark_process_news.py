@@ -78,7 +78,7 @@ def create_spark_session():
     return SparkSession.builder \
         .appName("NewsStreamingProcessor") \
         .config("spark.jars.packages", f"{kafka_package},{postgres_package},{aws_packages}") \
-        .config("spark.hadoop.fs.s3a.endpoint", os.getenv("MINIO_ENDPOINT", "http://localhost:9000")) \
+        .config("spark.hadoop.fs.s3a.endpoint", os.getenv("MINIO_ENDPOINT", "http://minio:9000")) \
         .config("spark.hadoop.fs.s3a.access.key", os.getenv("MINIO_ROOT_USER", "admin")) \
         .config("spark.hadoop.fs.s3a.secret.key", os.getenv("MINIO_ROOT_PASSWORD", "password")) \
         .config("spark.hadoop.fs.s3a.path.style.access", "true") \
@@ -96,15 +96,12 @@ def write_to_sinks(df, epoch_id):
         return
 
     try:
-        # Note d'architecture : Spark tournant en local sur l'hôte (master="local[*]"),
-        # on utilise 'localhost' pour atteindre le port exposé par le conteneur Docker.
-        # (Si Spark était "dockerizé", on utiliserait le nom de service 'postgres')
         # Écriture dans la base de données relationnelle
         # 1. Écriture dans la base de données relationnelle (sans les colonnes de partition)
         df_postgres = df.select("source", "title", "summary", "event_date", "publish_date", "is_fake")
         df_postgres.write \
             .format("jdbc") \
-            .option("url", "jdbc:postgresql://localhost:5433/finance_news") \
+            .option("url", "jdbc:postgresql://postgres:5432/finance_news") \
             .option("driver", "org.postgresql.Driver") \
             .option("dbtable", "news_articles") \
             .option("user", os.getenv("POSTGRES_USER", "airflow")) \
@@ -140,9 +137,9 @@ def main():
     # Lecture du flux Kafka depuis le début (earliest) pour respecter la contrainte du sujet
     df_kafka = spark.readStream \
         .format("kafka") \
-        .option("kafka.bootstrap.servers", "localhost:9093") \
+        .option("kafka.bootstrap.servers", "kafka:9092") \
         .option("subscribe", "raw_news") \
-        .option("startingOffsets", "latest") \
+        .option("startingOffsets", "earliest") \
         .load()
 
     # Transformation des données brutes en colonnes
